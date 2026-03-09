@@ -1,0 +1,52 @@
+blosc2_best:
+  error: blosc2 compression failed
+blosc2_float32_shuffle:
+  error: compress() got an unexpected keyword argument 'nthreads'
+brotli:
+  compressed_size: 16373926
+  level: quality=11
+  original_size: 49920000
+  ratio: 3.0487495790563606
+  time_s: 155.6652478369997
+byteshuffle_lzma:
+  compressed_size: 16360084
+  level: byteshuffle+lzma9
+  original_size: 49920000
+  ratio: 3.051329076305476
+  time_s: 40.39107068900012
+bz2:
+  compressed_size: 18136704
+  level: level=9
+  original_size: 49920000
+  ratio: 2.752429548389829
+  time_s: 3.1841539990000456
+delta_lzma:
+  compressed_size: 20817660
+  level: float32_delta+lzma9
+  original_size: 49920000
+  ratio: 2.397964036303792
+  time_s: 36.903672129999904
+lz4:
+  compressed_size: 21391143
+  level: max
+  original_size: 49920000
+  ratio: 2.3336761387645346
+  time_s: 34.80278445299882
+lzma:
+  compressed_size: 15336332
+  level: preset=9
+  original_size: 49920000
+  ratio: 3.2550156060784285
+  time_s: 40.902260072998615
+zlib:
+  compressed_size: 19463909
+  level: level=9
+  original_size: 49920000
+  ratio: 2.5647468861470735
+  time_s: 20.424048967999624
+zstandard:
+  compressed_size: 17092288
+  level: level=22
+  original_size: 49920000
+  ratio: 2.92061542609158
+  time_s: 33.83853304500008
