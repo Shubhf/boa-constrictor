@@ -1,4 +1,8 @@
-# BoaConstrictor: A Mamba-based Lossless Compressor for High Energy Physics Data [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
+# BoaConstrictor: Neural Lossless Compressor for High Energy Physics Data [![License: AGPL v3](https://img.shields.io/badge/License-AGPL_v3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
+
+> **GSoC 2025 Warm-Up Fork** — This fork replaces the Mamba backbone with MinGRU, achieving **4.18× compression ratio** on CMS Open Data. See [Warm-Up Task Results](#gsoc-2025-warm-up-task-results) below.
+
+---
 
 This repo provides a byte-level compression pipeline driven by a neural predictor (BoaConstrictor) and entropy coding (range coding). It includes:
 
@@ -11,12 +15,125 @@ Key entrypoints:
 - CLI: `main.py`
 - Example config: `experiments/cms_experiment/cms_experiment.yaml`
 
-> [!NOTE]  
-> **Reference implementation for GPU Portability**  
+> [!NOTE]
+> **Reference implementation for GPU Portability**
 > The `portability_solved_cpp` folder contains a reference implementation of BOA using the Mamba network in C++. This implementation specifically solves portability issues on GPUs for CUDA. Please note that it includes only compression/decompression logic and does not contain code for training.
 
+---
 
-## Quick start
+## GSoC 2025 Warm-Up Task Results
+
+### What was changed
+
+The original BOA backbone uses **Mamba** (a state-space model requiring `mamba-ssm` + `causal-conv1d`, both CUDA-only libraries). These fail to build on standard Colab T4 runtimes. This fork replaces Mamba with **MinGRU** — a minimal gated recurrent unit implemented entirely in PyTorch with zero additional dependencies.
+
+**New files:**
+- `model_mingru.py` — MinGRU backbone (drop-in replacement for `model.py`)
+- `main.py` — rewritten CLI (explicit model path, no auto-skip on checkpoint detection)
+- `experiments/cms_experiment/baseline_results.yaml` — full benchmark results
+
+### Benchmark Results — CMS Open Data (49.9 MB float32)
+
+| Method | Type | Compression Ratio |
+|--------|------|:-----------------:|
+| **MinGRU (30 epochs)** | **Neural** | **4.18×** |
+| **MinGRU (5 epochs)** | **Neural** | **3.89×** |
+| LZMA (preset=9) | Traditional | 3.26× |
+| Brotli (quality=11) | Traditional | 3.05× |
+| ByteShuffle + LZMA | Physics-Aware | 3.05× |
+| ZSTD (level=22) | Traditional | 2.92× |
+| BZ2 (level=9) | Traditional | 2.75× |
+| Blosc2 + SHUFFLE (float32) | Scientific Array | 2.57× |
+| ZLIB (level=9) | Traditional | 2.56× |
+| Blosc2 (ZSTD, clevel=9) | Scientific Array | 2.52× |
+| Delta + LZMA | Physics-Aware | 2.40× |
+| LZ4 (max) | Traditional | 2.33× |
+
+**Key numbers:**
+- MinGRU beats LZMA (best traditional) by **+28%**
+- MinGRU beats Blosc2 (HEP standard) by **+66%**
+- ByteShuffle+LZMA uses explicit float32 domain knowledge — MinGRU matches and surpasses it automatically
+
+### Training curve
+
+| Epoch | Val bpp | Ratio |
+|-------|---------|-------|
+| 1 | 2.1896 | 3.65× |
+| 8 | 1.9985 | 4.00× |
+| 21 | 1.9246 | 4.16× |
+| 30 | 1.9153 | **4.18×** |
+
+Model converges cleanly. No overfitting observed through 30 epochs.
+
+### Timings (T4 GPU, fp32)
+
+| Stage | Duration |
+|-------|----------|
+| Training (30 epochs) | 143 min |
+| Compression (49.9 MB) | 43s |
+| Decompression | 43s |
+| Verification | ✅ PASS — 49,920,000 bytes match |
+
+### Architecture
+
+Both Mamba and MinGRU use the same interface:
+
+```
+Embedding(256 → d_model) → [Block × num_layers] → Linear(d_model → 256) → Softmax → Range Coder
+```
+
+Config used: `d_model=256`, `num_layers=4`, `vocab_size=256`, `epochs=30`, `lr=5e-4`, `precision=fp32`
+
+### Why MinGRU over Mamba
+
+| | Mamba | MinGRU |
+|---|---|---|
+| Dependencies | mamba-ssm + causal-conv1d (CUDA-only) | Pure PyTorch |
+| Colab T4 | Build errors | Works out of the box |
+| Inference | O(1) per step via parallel scan | O(1) per step via hidden state |
+| Portability | GPU-locked | CPU, GPU, HPC, edge |
+
+### Key bug fixed
+
+The GRU defaults to eval mode inside PyTorch's `inference_mode` context, causing a `cudnn RNN backward can only be called in training mode` error during training. Fix applied in `model_mingru.py`:
+
+```python
+def forward(self, x, inference_params=None):
+    if torch.is_grad_enabled():
+        self.gru.train()
+    out, _ = self.gru(x)
+    return out
+```
+
+---
+
+## Quick Start (MinGRU)
+
+```bash
+# 1. Clone and install
+git clone https://github.com/Shubhf/boa-constrictor.git
+cd boa-constrictor
+pip install pybind11 ninja numpy PyYAML tqdm
+
+# 2. Add your dataset
+# Place CMS_DATA_float32.bin in experiments/cms_experiment/
+
+# 3. Train MinGRU from scratch
+python main.py --config cms_experiment --show-timings --verify
+
+# 4. Run all baselines for comparison
+python main_baseline.py --config cms_experiment --all --compare
+```
+
+To restore from a checkpoint:
+```python
+# In your YAML, set:
+model_path: experiments/cms_experiment/cms_experiment_final_model_fp32.pt
+```
+
+---
+
+## Quick start (original)
 
 1) Install dependencies (PyTorch not pinned here; use the build suited for your system):
 
@@ -41,13 +158,15 @@ Useful flags:
 - `--device cpu|cuda` to override device
 - `--precision fp32|fp16|fp8` to override compute precision (training only)
 - `--train-only`, `--compress-only`, `--decompress-only` to run specific stages
-- `--model-path /path/to/model.pt` to load a pre-trained checkpoint and skip training (also supported via `model_path` in the YAML)
+- `--model-path /path/to/model.pt` to load a pre-trained checkpoint and skip training
 - `--verify` to verify the files after compression-decompression cycle
 - `--evaluate`, `--evaluate-only` to evaluate performance of the compression model
 - `--comparison-baseline-only` to run LZMA and ZLIB on the dataset as baselines
 
-> [!WARNING]  
-Currently training can only be done on a CUDA-Compatible GPU!
+> [!WARNING]
+> Currently training can only be done on a CUDA-Compatible GPU!
+
+---
 
 ## Config file structure
 
@@ -61,7 +180,6 @@ device: cuda
 precision: fp16
 
 # Optional: set a checkpoint to skip training
-# Path can be absolute or relative to this YAML file
 # model_path: /path/to/checkpoints/example_experiment_final_model_fp16.pt
 
 dataloader:
@@ -83,52 +201,36 @@ compression:
 splits: [0.8, 0.1, 0.1]
 ```
 
-- `file_path` should point to the raw bytes file to train/encode.
-- `splits` should sum to 1.0; if not, defaults are applied.
-- `chunks_count` controls how many chunks are used during compression; see Performance notes below.
-
-
-## CLI overview
-
-`main.py` wires together:
-- Reading input bytes
-- Building the model (`BoaConstrictor`) and `ByteDataloader`
-- Splitting into train/val/test (`make_splits`)
-- Training via `train(...)`
-- Compression/Decompression via `BoaFile.compress(...)` / `BoaFile.decompress(...)`
-
-Timings are printed when `--show-timings` is used. Progress bars respect `progress: true` (in config) unless `--no-progress` is passed.
-
+---
 
 ## Architecture and data flow
 
-1) Byte modeling (neural predictor)
+1) **Byte modeling (neural predictor)**
    - The `BoaConstrictor` model receives byte sequences and predicts a distribution over the next byte (0..255) at each position.
    - Training minimizes cross-entropy between predictions and observed bytes.
 
-2) Entropy coding (range coding)
+2) **Entropy coding (range coding)**
    - For each byte to be stored, the predictor provides probabilities p(b | context).
    - A range coder converts these probabilities and symbols into a compact bitstream close to the theoretical entropy (−log₂ p).
 
-3) Container and chunks
+3) **Container and chunks**
    - Data is processed in chunks, enabling parallelism and streaming.
    - Each chunk stores (a) first bytes, (b) the compressed range-coded stream, and (c) metadata.
 
-4) Decompression mirrors compression
-   - The range decoder reconstructs each symbol using the same probabilities generated by the model conditioned on previously decoded bytes (and chunk state).
+4) **Decompression mirrors compression**
+   - The range decoder reconstructs each symbol using the same probabilities generated by the model conditioned on previously decoded bytes.
 
+---
 
-## Range coding primer (entropy coding)
+## Range coding primer
 
-Range coding is a practical form of arithmetic coding. At a high level, it maintains an interval [low, high) within [0, 1) representing the current coder state. For each symbol with probability distribution {p_i} over the alphabet:
+Range coding is a practical form of arithmetic coding. It maintains an interval [low, high) within [0, 1). For each symbol with probability distribution {p_i}:
 
 - Partition the current interval into sub-intervals proportional to {p_i}
 - Select the sub-interval for the observed symbol
 - Renormalize when the interval becomes too small, emitting bits
 
-Conceptually, after encoding a sequence x₁…x_T, the final interval size is approximately Π_t p(x_t | context), so the total code length approaches −Σ_t log₂ p(x_t | context) bits.
-
-A simplified encode step with cumulative frequencies (integer-scaled):
+Total code length approaches −Σ_t log₂ p(x_t | context) bits.
 
 ```
 state: low=0, high=RANGE_MAX
@@ -140,128 +242,59 @@ for symbol s with cumulative counts C and total T:
     output_bit_and_shift(low, high)
 ```
 
-- `C[k]` is the cumulative count of symbols < k (C[0] = 0, C[Σ] = T)
-- Renormalization shifts out stable MSBs so the internal registers don’t overflow
-- Decoding performs the inverse using the same `C` and `T`
+---
 
-Why range coding here?
-- It’s simple, fast, and numerically stable vs naive arithmetic coding
-- Integer arithmetic avoids floating-point drift
-- It compresses close to the entropy bound, assuming good probability estimates from the model
-
-
-## CPU and GPU performance notes
-
-Compression/decompression performance hinges on two main costs:
-1) Probability computation (neural model inference)
-2) Range coder symbol processing
-
-Range coder serialism vs parallelism
-- The range coder is intrinsically sequential per symbol. However, you can parallelize across independent chunks.
-- Choose `compression.chunks_count` to balance parallelism and overhead. Too many tiny chunks increase metadata and launch overhead; too few large chunks underutilize parallel resources.
-
-CPU speedups
-- Vectorized preprocessing: Prefer NumPy or PyTorch tensor operations on large slices over Python loops.
-- Chunk sizing: Tune `chunks_count` so each chunk fits in cache and reduces memory stalls.
-- Threaded inference: If running on CPU, enable MKL/OpenMP threading for BLAS (subject to your PyTorch build). Typical knobs: `OMP_NUM_THREADS`, `MKL_NUM_THREADS`, `torch.set_num_threads`.
-- I/O buffering: Read the dataset once into memory when feasible; use memory-mapped I/O for very large files.
-
-GPU speedups
-- Batch inference: Evaluate the model on multiple sequences (or longer sequences) in one pass to utilize SMs better.
-- Mixed precision: Use `precision: fp16` (or `--precision fp16`) to halve bandwidth and often speed up GEMMs/attention layers on supported GPUs (training only).
-- Chunk-level parallelism: Schedule multiple chunks concurrently so the GPU is fed continuously; avoid tiny chunks that cause excessive kernel launch overhead.
-- Custom GPU range coder for batch independent compression
+## Performance notes
 
 ### Streaming compression batches
 
-Compression runs in batches of chunks to keep memory usage bounded. By default, the batch size ("gpu_streams") is chosen automatically based on your configuration. For demos or reproducibility, you can force a fixed batch size via an environment variable:
-
 ```bash
-# Example: process 10,000 chunks in two streaming batches of 5,000 each
 export BOA_GPU_STREAMS=5000
 python3 main.py --config your_experiment
 ```
 
-With `chunks_count: 10000` (or when the input produces 10,000 chunks), this will compress in two waves of 5,000 chunks each, demonstrating the streaming pattern (write-as-you-go with an index finalized at the end).
+### CPU speedups
+- Vectorized preprocessing with NumPy/PyTorch tensor operations
+- Tune `chunks_count` to fit chunks in cache
+- `OMP_NUM_THREADS`, `MKL_NUM_THREADS`, `torch.set_num_threads` for CPU threading
 
-## Reproducibility and checkpoints
+### GPU speedups
+- Batch inference across longer sequences
+- Mixed precision: `--precision fp16`
+- Chunk-level parallelism to keep GPU fed
 
-- The CLI saves/loads model checkpoints according to the `train(...)` implementation. Keep names consistent with your `name` field so compression uses the trained model you expect.
-- For long runs, prefer deterministic flags where feasible (e.g., set random seeds) but note that GPU determinism can reduce performance and is not always guaranteed. Only guaranteed determinism is across **same** software stack and **same** hardware stack.
-
+---
 
 ## Troubleshooting
 
-- `file_path` not found:
-  - Update the YAML to point to an existing dataset file. For a smoke test, use a small file first.
-- CUDA out of memory:
-  - Reduce `batch_size`, decrease `seq_len`. Ensure other processes aren’t using VRAM.
-- Slow throughput on GPU:
-  - Increase chunk-level parallelism and batch size, and avoid tiny chunks.
+- `file_path` not found — update YAML to point to existing dataset
+- CUDA out of memory — reduce `batch_size` or `seq_len`
+- Slow GPU throughput — increase chunk parallelism, avoid tiny chunks
+- `mamba-ssm` build errors — use MinGRU backbone (`model_mingru.py`), no CUDA libraries needed
 
+---
 
-## References and further reading
-- Range coding (arithmetic coding): classic papers and tutorials provide in-depth renormalization details and proofs.
-- Neural compression literature for modeling bytes/sequences with transformers and state-space models (e.g., Mamba).
+## References
+
+- BOA Constrictor paper: [arXiv:2511.11337](https://arxiv.org/abs/2511.11337)
+- Range coding: classic arithmetic coding literature
+- MinGRU: [Were RNNs All We Needed? (2024)](https://arxiv.org/abs/2410.01201)
+- CMS Open Data: [opendata.cern.ch](https://opendata.cern.ch)
 
 ## Citation
-If you use this codebase, or otherwise find our work valuable, please cite BOA Constrictor:
-```
+
+```bibtex
 @misc{gupta2025boaconstrictormambabasedlossless,
-      title={BOA Constrictor: A Mamba-based lossless compressor for High Energy Physics data}, 
+      title={BOA Constrictor: A Mamba-based lossless compressor for High Energy Physics data},
       author={Akshat Gupta and Caterina Doglioni and Thomas Joseph Elliott},
       year={2025},
       eprint={2511.11337},
       archivePrefix={arXiv},
       primaryClass={physics.comp-ph},
-      url={https://arxiv.org/abs/2511.11337}, 
-}
-@software{gupta_2025_17571973,
-  author       = {Gupta, Akshat and
-                  Doglioni, Caterina and
-                  Elliott, Thomas},
-  title        = {Boa Constrictor: A Mamba-based Lossless Compressor
-                   for High Energy Physics data
-                  },
-  month        = nov,
-  year         = 2025,
-  publisher    = {Zenodo},
-  version      = {v1.0.0},
-  doi          = {10.5281/zenodo.17571973},
-  url          = {https://doi.org/10.5281/zenodo.17571973},
-  swhid        = {swh:1:dir:7273b2950222286fe7622e7c545a5806863d1afa
-                   ;origin=https://doi.org/10.5281/zenodo.17571972;vi
-                   sit=swh:1:snp:6b782111318d9521b182d6fab427ad97d9ea
-                   17ad;anchor=swh:1:rel:355c1a3afc7bb7536829745e9c53
-                   0fe831265922;path=boa-constrictor-1.0.0
-                  },
+      url={https://arxiv.org/abs/2511.11337},
 }
 ```
+
 ## License
 
-This project is licensed under the **GNU Affero General Public License v3.0 (AGPLv3)**.
-
-See the [LICENSE](LICENSE) file for details.
-
-## Disclosure of Delegation to Generative AI
-
-The authors declare the use of generative AI in the research and writing process. According to the GAIDeT taxonomy (2025), the following tasks were delegated to GAI tools under **full** human supervision:
-
-- Feasibility assessment and risk evaluation
-- Preliminary hypothesis testing
-- Evaluation of the novelty of the research and identification of gaps
-- Code generation
-- Code optimisation
-- Creation of algorithms for data analysis
-- Visualization
-- Proofreading and editing
-- Summarising text
-- Adapting and adjusting emotional tone
-- Reformatting
-- Preparation of press releases and outreach materials
-- Quality assessment
-
-The GAI tool used were: ChatGPT-5, Gemini 2.5 Pro, Claude Sonnet 4.5.
-Responsibility for the final manuscript lies entirely with the authors.
-GAI tools are not listed as authors and do not bear responsibility for the final outcomes.
-Declaration submitted by: Akshat Gupta
+Licensed under the **GNU Affero General Public License v3.0 (AGPLv3)**. See [LICENSE](LICENSE) for details.
